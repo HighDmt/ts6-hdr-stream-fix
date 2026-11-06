@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(hdrfix VERSION 1.0.0 LANGUAGES C CXX RC)
+project(hdrfix VERSION 1.1.0 LANGUAGES C CXX RC)
 
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "hdrfix must be built with MSVC for x64")
@@ -53,6 +53,7 @@ add_library(hdrfix SHARED
   src/verbose_log.cpp
   src/hooks.cpp
   src/window_fix.cpp
+  src/window_capture.cpp
   src/vtable_index.c
   src/duplication_wrapper.cpp
   src/converter.cpp

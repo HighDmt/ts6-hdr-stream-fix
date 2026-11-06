@@ -5,7 +5,7 @@
 struct Config {
     bool enabled = true;
     float sdrWhiteOverrideNits = 0.0f; // 0 = read the Windows SDR white level
-    float knee = 1.0f;                 // roll-off start, in SDR-white units
+    float knee = 0.75f;                // roll-off start, in SDR-white units
     float peakOverrideNits = 0.0f;     // 0 = DXGI_OUTPUT_DESC1::MaxLuminance
     bool fixWindowCapture = true;      // also fix single-window (app) sharing
     bool log = true;

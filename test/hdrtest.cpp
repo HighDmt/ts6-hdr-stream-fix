@@ -46,7 +46,7 @@ double LinearToSrgb(double l)
 }
 
 struct FixParams {
-    double sdrWhite = 80, peak = 1000, knee = 1.0;
+    double sdrWhite = 80, peak = 1000, knee = 0.75;
 };
 
 // Expected output of the fix for linear input m (1.0 = SDR white), linear result.
@@ -588,8 +588,7 @@ int wmain(int argc, wchar_t** argv)
             DXGI_OUTPUT_DESC1 d{};
             if (FAILED(o.As(&o6)) || FAILED(o6->GetDesc1(&d)))
                 continue;
-            const bool hdr = d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ||
-                             d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709; // same test as the DLL
+            const bool hdr = IsHdrColorSpace(d.ColorSpace); // same test as the DLL
             printf("  %ls  %ldx%ld  %s  peak %.0f nits  SDR white %.0f nits\n", d.DeviceName,
                    d.DesktopCoordinates.right - d.DesktopCoordinates.left,
                    d.DesktopCoordinates.bottom - d.DesktopCoordinates.top, hdr ? "HDR" : "SDR", d.MaxLuminance,
@@ -617,7 +616,7 @@ int wmain(int argc, wchar_t** argv)
     fp.peak = IniFloat(ini, L"peak_override_nits", 0);
     if (fp.peak <= 0)
         fp.peak = od.MaxLuminance > 0 ? od.MaxLuminance : 1000;
-    fp.knee = std::clamp(IniFloat(ini, L"knee", 1.0f), 0.0f, 1.0f);
+    fp.knee = std::clamp(IniFloat(ini, L"knee", 0.75f), 0.0f, 1.0f);
     printf("\nTesting %ls: SDR white %.0f nits (scRGB %.3f), peak %.0f nits, knee %.2f\n", od.DeviceName, fp.sdrWhite,
            fp.sdrWhite / 80, fp.peak, fp.knee);
 

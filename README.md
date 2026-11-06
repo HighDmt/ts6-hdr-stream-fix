@@ -8,8 +8,8 @@ sharing a single app.
 | on your screen (sRGB grey level) | 255 | 235 | 192 | 128 | 64 |
 |----------------------------------|-----|-----|-----|-----|----|
 | what viewers get without hdrfix  | 255 | 255 | 255 | 218 | 113 |
-| with hdrfix (default settings)   | 255 | 235 | 192 | 128 | 64 |
-| with hdrfix, `knee=0.75`         | 240 | 232 | 192 | 128 | 64 |
+| with hdrfix (default settings)   | 240 | 232 | 192 | 128 | 64 |
+| with hdrfix, `knee=1`            | 255 | 235 | 192 | 128 | 64 |
 
 No OBS, no virtual camera, no admin rights. To remove it, delete one file.
 
@@ -52,7 +52,7 @@ TeamSpeak loads `version.dll` from its own folder automatically. Nothing else to
 Open `hdrfix.log` in the TeamSpeak folder. After starting TeamSpeak you should see:
 
 ```
-hdrfix 1.0.0 loaded into TeamSpeak.exe (Windows 10.0 build 26100)
+hdrfix 1.1.0 loaded into TeamSpeak.exe (Windows 10.0 build 26100)
 hook IDXGIOutput1::DuplicateOutput (vtable slot 22, ...): installed
 hook IDXGIOutput5::DuplicateOutput1 (vtable slot 26, ...): installed
 hook PrintWindow: installed
@@ -62,7 +62,7 @@ hook BitBlt: installed
 Sharing a screen adds:
 
 ```
-DuplicateOutput on \\.\DISPLAY1 intercepted: 2560x1440 FP16 -> BGRA8, knee 1.00
+DuplicateOutput on \\.\DISPLAY1 intercepted: 2560x1440 FP16 -> BGRA8, knee 0.75
 first frame: 2560x1440 ...; SDR white 260 nits, peak 1000 nits
 ```
 
@@ -93,7 +93,7 @@ Read when TeamSpeak starts; restart TeamSpeak after changing it.
 |-----|---------|---------|
 | `enabled` | `1` | `0` = do nothing; TeamSpeak behaves as if hdrfix weren't there |
 | `sdr_white_override_nits` | `0` | `0` = follow the Windows "SDR content brightness" slider, live; otherwise a fixed white level in nits |
-| `knee` | `1` | where the highlight roll-off starts, relative to SDR white; below it colours pass through exactly. `1` = no roll-off |
+| `knee` | `0.75` | where the highlight roll-off starts, relative to SDR white; below it colours pass through exactly. `1` = no roll-off |
 | `peak_override_nits` | `0` | `0` = the monitor's peak brightness as reported by Windows; used as the top of the roll-off |
 | `fix_window_capture` | `1` | also fix sharing a single app; `0` = full-screen sharing only |
 | `log` | `1` | write `hdrfix.log` next to the DLL (or in `%TEMP%` if that folder isn't writable); if it's over 1 MB when TeamSpeak starts, it starts over |
@@ -102,11 +102,12 @@ Read when TeamSpeak starts; restart TeamSpeak after changing it.
 **Which `knee`?** An SDR stream has nothing brighter than white, so something has to
 give for HDR content brighter than your desktop's white:
 
-- `knee=1` (default): desktop, apps and text come out exactly as on your screen; brighter
-  HDR highlights (HDR games and videos) all become plain white. Best if you mostly share
-  desktop or apps.
-- `knee=0.75`: HDR highlights keep some detail, but white UI comes out slightly dimmer
-  (255 becomes 240). Better if you mostly share HDR games or videos.
+- `knee=0.75` (default): HDR highlights (HDR games and videos) keep some detail and their
+  colours, but white UI comes out slightly dimmer (255 becomes about 240). Everything
+  below 75% of your desktop's white is untouched.
+- `knee=1`: desktop, apps and text come out exactly as on your screen, but brighter HDR
+  highlights all become plain white, and very bright saturated colours can shift (a bright
+  orange turns yellowish). Best if you only share desktop or apps.
 
 ## Troubleshooting
 
@@ -160,9 +161,10 @@ contains no user names, file paths or window titles. It does contain window clas
   apps). If a TeamSpeak update changes that, hdrfix stops having an effect (the log then
   shows no `intercepted` / `window fix` lines) until it's updated.
 - Sharing a single app costs more than sharing a screen: hdrfix captures the app a
-  second time in HDR and copies each frame back to the CPU (a few milliseconds per frame
-  and roughly 1 GB/s of memory traffic for a 1440p window at 30 fps). Full-screen sharing
-  adds one GPU pass per frame, well under a millisecond on a modern GPU.
+  second time in HDR and copies each frame back to the CPU (about 15 MB per frame for a
+  1440p window). The copy runs one frame ahead, so TeamSpeak doesn't wait for the GPU, and
+  the shared app runs one frame (about 33 ms at 30 fps) behind the screen. Full-screen
+  sharing adds one GPU pass per frame, well under a millisecond on a modern GPU.
 - HDR content brighter than your desktop's white is compressed or clipped (see `knee`).
 
 ## How it works
@@ -194,10 +196,15 @@ when Windows HDR is on (Chrome, Edge, Electron apps, games) are clipped the same
    itself with Windows.Graphics.Capture in FP16 (unclipped), converts it with the same
    shader, and overwrites the pixels GDI just produced. Its capture stops 3 s after
    TeamSpeak stops asking.
-4. **Fallbacks.** SDR monitors, unexpected formats, failed calls or exceptions all fall
-   back to TeamSpeak's own result. If a frame can't be converted mid-stream, the wrapper
-   reports `DXGI_ERROR_ACCESS_LOST`; TeamSpeak then restarts the capture, which hdrfix
-   leaves alone from then on.
+4. **Fallbacks.** SDR monitors, unexpected formats and failed calls all fall back to
+   TeamSpeak's own result.
+   - If a screen frame can't be converted mid-stream (say, the GPU driver restarts), the
+     wrapper reports `DXGI_ERROR_ACCESS_LOST`. TeamSpeak then restarts the capture and
+     hdrfix tries again. After 3 failures in a row it leaves new screen captures alone for
+     a minute.
+   - A failed app capture is retried after 5 seconds.
+   - A crash inside hdrfix's own code is caught. That part of hdrfix (screen or app
+     sharing) then stays off until TeamSpeak restarts.
 
 Some details found along the way:
 
@@ -262,8 +269,9 @@ src/hooks.cpp              desktop duplication hooks, intercept/fallback logic
 src/duplication_wrapper.*  the IDXGIOutputDuplication handed to TeamSpeak
 src/converter.*            D3D11 rendering in a separate context state
 src/hdr_to_sdr.hlsl        the conversion shader
-src/window_fix.*           single-app sharing: GDI hooks + Windows.Graphics.Capture
-src/display_info.*         SDR white level via QueryDisplayConfig
+src/window_fix.*           single-app sharing: GDI hooks, when to step in, pixel replacement
+src/window_capture.*       single-app sharing: FP16 Windows.Graphics.Capture + readback
+src/display_info.*         HDR detection, monitor -> DXGI output, SDR white level
 src/vtable_index.c         vtable slots from the SDK's C interface layout
 src/log_config.*           hdrfix.ini + hdrfix.log
 src/verbose_log.*          optional per-second capture statistics

@@ -2,6 +2,37 @@
 
 #include <windows.h>
 #include <vector>
+#include <wrl/client.h>
+
+using Microsoft::WRL::ComPtr;
+
+bool IsHdrColorSpace(DXGI_COLOR_SPACE_TYPE cs)
+{
+    return cs == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 || cs == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+}
+
+bool FindOutputForMonitor(HMONITOR monitor, DXGI_OUTPUT_DESC1& desc)
+{
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof(mi);
+    ComPtr<IDXGIFactory1> factory;
+    if (!GetMonitorInfoW(monitor, &mi) || FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+        return false;
+    ComPtr<IDXGIAdapter1> adapter;
+    for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+        ComPtr<IDXGIOutput> output;
+        for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND; ++o) {
+            ComPtr<IDXGIOutput6> output6;
+            DXGI_OUTPUT_DESC1 d{};
+            if (SUCCEEDED(output.As(&output6)) && SUCCEEDED(output6->GetDesc1(&d)) &&
+                _wcsicmp(d.DeviceName, mi.szDevice) == 0) {
+                desc = d;
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 float QuerySdrWhiteNits(const wchar_t* gdiDeviceName)
 {

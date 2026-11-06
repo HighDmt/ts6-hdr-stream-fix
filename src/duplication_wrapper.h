@@ -46,8 +46,5 @@ private:
     Converter converter_;
     DXGI_FORMAT outFormat_;
     bool loggedFirstFrame_ = false;
+    bool reportedSuccess_ = false;
 };
-
-// Called when a converted frame can't be produced: from then on this process
-// leaves desktop duplication alone (see hooks.cpp).
-void DisableInterception(const char* reason);

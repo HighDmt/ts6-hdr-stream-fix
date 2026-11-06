@@ -1,7 +1,8 @@
 #include "duplication_wrapper.h"
 
-#include "verbose_log.h"
+#include "hooks.h"
 #include "log_config.h"
+#include "verbose_log.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -105,11 +106,15 @@ HRESULT DuplicationWrapper::AcquireNextFrame(UINT timeoutMs, DXGI_OUTDUPL_FRAME_
 
     if (!converted || FAILED(converted->QueryInterface(IID_PPV_ARGS(resource)))) {
         // Can't produce a correct frame. Make TeamSpeak recreate the duplication;
-        // the hook then calls the original API.
+        // the hook then tries again (or passes through, after repeated failures).
         *resource = nullptr;
         inner_->ReleaseFrame();
-        DisableInterception("frame conversion failed");
+        ReportConversionFailure(frame ? "frame conversion failed" : "no desktop frame");
         return DXGI_ERROR_ACCESS_LOST;
+    }
+    if (!reportedSuccess_) {
+        ReportConversionSuccess();
+        reportedSuccess_ = true;
     }
     return hr;
 }

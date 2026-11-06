@@ -1,5 +1,6 @@
 #include "hooks.h"
 
+#include "display_info.h"
 #include "duplication_wrapper.h"
 #include "log_config.h"
 
@@ -22,7 +23,17 @@ using DuplicateOutput1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGIOutput5*, IUnknown*,
 
 DuplicateOutputFn g_origDuplicateOutput = nullptr;   // MinHook trampolines
 DuplicateOutput1Fn g_origDuplicateOutput1 = nullptr;
-std::atomic<bool> g_disabled{false};
+
+// Failure handling. An ordinary failure (e.g. a GPU driver reset mid-stream) makes TeamSpeak
+// restart the capture, which hdrfix intercepts again. Only kMaxFailuresInARow failures
+// without a good frame in between pause interception, for kPauseMs, so a persistent
+// problem can't leave TeamSpeak restarting its capture forever. A crash in our setup
+// code is different: that's a bug, and interception stays off until TeamSpeak restarts.
+constexpr int kMaxFailuresInARow = 3;
+constexpr ULONGLONG kPauseMs = 60000;
+std::atomic<int> g_failuresInARow{0};
+std::atomic<ULONGLONG> g_pausedUntil{0};
+std::atomic<bool> g_crashed{false};
 
 // >0 while we are inside one of our hooks on this thread. DXGI may implement
 // DuplicateOutput on top of DuplicateOutput1; such inner calls must not be intercepted.
@@ -55,12 +66,6 @@ private:
     DPI_AWARENESS_CONTEXT previous_ = nullptr;
 };
 
-bool IsHdr(DXGI_COLOR_SPACE_TYPE cs)
-{
-    // With HDR on, outputs report HDR10 (G2084/P2020); the desktop itself is composed in scRGB.
-    return cs == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 || cs == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
-}
-
 const char* FormatName(DXGI_FORMAT f)
 {
     switch (f) {
@@ -84,8 +89,12 @@ HRESULT CallOriginalDuplicateOutput1(IDXGIOutput5* output, IUnknown* device, UIN
 bool TryIntercept(IDXGIOutput* output, IUnknown* device, UINT flags, DXGI_FORMAT outFormat,
                   const char* api, IDXGIOutputDuplication** out)
 {
-    if (!Cfg().enabled || g_disabled)
+    if (!Cfg().enabled || g_crashed)
         return false;
+    if (GetTickCount64() < g_pausedUntil) {
+        Log("%s: paused after repeated failures, passing through", api);
+        return false;
+    }
 
     ComPtr<IDXGIOutput6> output6;
     DXGI_OUTPUT_DESC1 od{};
@@ -93,7 +102,7 @@ bool TryIntercept(IDXGIOutput* output, IUnknown* device, UINT flags, DXGI_FORMAT
         Log("%s: IDXGIOutput6 unavailable, passing through", api);
         return false;
     }
-    if (!IsHdr(od.ColorSpace)) {
+    if (!IsHdrColorSpace(od.ColorSpace)) {
         Log("%s on %ls: SDR output (color space %d), passing through", api, od.DeviceName, od.ColorSpace);
         return false;
     }
@@ -144,8 +153,9 @@ bool TryInterceptSafe(IDXGIOutput* output, IUnknown* device, UINT flags, DXGI_FO
     __try {
         return TryIntercept(output, device, flags, outFormat, api, out);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("%s: exception 0x%08lX during setup, passing through", api, GetExceptionCode());
-        g_disabled = true;
+        Log("%s: crashed (exception 0x%08lX) during setup; screen captures are left alone until TeamSpeak restarts",
+            api, GetExceptionCode());
+        g_crashed = true;
         return false;
     }
 }
@@ -196,11 +206,19 @@ bool HookSlot(void* object, size_t slot, void* detour, void** original, const ch
 
 } // namespace
 
-void DisableInterception(const char* reason)
+void ReportConversionFailure(const char* reason)
 {
-    if (!g_disabled.exchange(true))
-        Log("disabling interception in this process: %s", reason);
+    const int n = ++g_failuresInARow;
+    if (n < kMaxFailuresInARow) {
+        Log("%s; TeamSpeak will restart the capture and hdrfix will try again", reason);
+        return;
+    }
+    g_failuresInARow = 0;
+    g_pausedUntil = GetTickCount64() + kPauseMs;
+    Log("%s, %d times in a row; leaving new screen captures alone for %llu s", reason, n, kPauseMs / 1000);
 }
+
+void ReportConversionSuccess() { g_failuresInARow = 0; }
 
 bool InstallHooks()
 {

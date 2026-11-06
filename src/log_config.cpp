@@ -57,7 +57,7 @@ void LoadConfig(HMODULE self)
 
     g_config.enabled = GetPrivateProfileIntW(L"hdrfix", L"enabled", 1, p) != 0;
     g_config.sdrWhiteOverrideNits = std::max(0.0f, ReadFloat(p, L"sdr_white_override_nits", 0.0f));
-    g_config.knee = std::clamp(ReadFloat(p, L"knee", 1.0f), 0.0f, 1.0f);
+    g_config.knee = std::clamp(ReadFloat(p, L"knee", Config{}.knee), 0.0f, 1.0f);
     g_config.peakOverrideNits = std::max(0.0f, ReadFloat(p, L"peak_override_nits", 0.0f));
     g_config.fixWindowCapture = GetPrivateProfileIntW(L"hdrfix", L"fix_window_capture", 1, p) != 0;
     g_config.log = GetPrivateProfileIntW(L"hdrfix", L"log", 1, p) != 0;
