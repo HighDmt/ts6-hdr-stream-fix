@@ -1,0 +1,32 @@
+// File properties of the DLL (right-click version.dll > Properties > Details), so it's
+// easy to tell apart from the real Windows version.dll.
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     HDRFIX_VERSION_MAJOR, HDRFIX_VERSION_MINOR, HDRFIX_VERSION_PATCH, 0
+PRODUCTVERSION  HDRFIX_VERSION_MAJOR, HDRFIX_VERSION_MINOR, HDRFIX_VERSION_PATCH, 0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "hdrfix: HDR screen-sharing fix for TeamSpeak 6 (version.dll proxy)"
+            VALUE "FileVersion", HDRFIX_VERSION
+            VALUE "InternalName", "hdrfix"
+            VALUE "LegalCopyright", "Copyright (c) 2026 HighDmt. MIT License."
+            VALUE "OriginalFilename", "version.dll"
+            VALUE "ProductName", "hdrfix"
+            VALUE "ProductVersion", HDRFIX_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

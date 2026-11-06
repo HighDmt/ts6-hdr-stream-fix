@@ -1,0 +1,24 @@
+; Exports of %SystemRoot%\System32\version.dll, same names and ordinals.
+; Each Fwd_* function forwards to the real DLL (see proxy_version.cpp).
+LIBRARY version
+EXPORTS
+    GetFileVersionInfoA        = Fwd_GetFileVersionInfoA        @1
+    GetFileVersionInfoByHandle = Fwd_GetFileVersionInfoByHandle @2
+    GetFileVersionInfoExA      = Fwd_GetFileVersionInfoExA      @3
+    GetFileVersionInfoExW      = Fwd_GetFileVersionInfoExW      @4
+    GetFileVersionInfoSizeA    = Fwd_GetFileVersionInfoSizeA    @5
+    GetFileVersionInfoSizeExA  = Fwd_GetFileVersionInfoSizeExA  @6
+    GetFileVersionInfoSizeExW  = Fwd_GetFileVersionInfoSizeExW  @7
+    GetFileVersionInfoSizeW    = Fwd_GetFileVersionInfoSizeW    @8
+    GetFileVersionInfoW        = Fwd_GetFileVersionInfoW        @9
+    VerFindFileA               = Fwd_VerFindFileA               @10
+    VerFindFileW               = Fwd_VerFindFileW               @11
+    VerInstallFileA            = Fwd_VerInstallFileA            @12
+    VerInstallFileW            = Fwd_VerInstallFileW            @13
+    ; The real version.dll forwards these two to kernel32 as well.
+    VerLanguageNameA           = KERNEL32.VerLanguageNameA      @14
+    VerLanguageNameW           = KERNEL32.VerLanguageNameW      @15
+    VerQueryValueA             = Fwd_VerQueryValueA             @16
+    VerQueryValueW             = Fwd_VerQueryValueW             @17
+    ; Used by hdrtest to wait until the hooks are in place.
+    HdrFix_WaitReady                                            @18
