@@ -24,7 +24,6 @@ public:
 private:
     bool EnsureOutput(UINT width, UINT height);
     bool EnsureSrcCopy(const D3D11_TEXTURE2D_DESC& srcDesc);
-    void RefreshWhiteLevel(bool force);
     void UpdateConstants();
 
     template <class T> using ComPtr = Microsoft::WRL::ComPtr<T>;
@@ -51,5 +50,4 @@ private:
     wchar_t gdiName_[32] = {};
     float sdrWhiteNits_ = 80.0f;
     float peakNits_ = 1000.0f;
-    ULONGLONG lastWhiteQuery_ = 0;
 };

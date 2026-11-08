@@ -22,7 +22,6 @@ namespace {
 constexpr int kActivateAfterCalls = 3; // captures within kActivateWindowMs that mean "stream"
 constexpr ULONGLONG kActivateWindowMs = 2000;
 constexpr ULONGLONG kIdleCloseMs = 3000; // stop our capture once TeamSpeak stops
-constexpr ULONGLONG kMonitorCacheMs = 2000;
 constexpr ULONGLONG kRetryMs = 5000; // after a failure, try again this much later
 
 std::atomic<bool> g_crashed{false}; // set after a crash in our code: the fix stays off
@@ -82,23 +81,22 @@ void Verbose(const char* what, HWND hwnd, const char* detail = nullptr)
 // ---- Monitors ----------------------------------------------------------------------
 
 struct MonitorState {
-    ULONGLONG checked = 0;
     bool hdr = false;
     DXGI_OUTPUT_DESC1 desc{};
 };
 
-// Whether a monitor is in HDR mode, and its DXGI output (cached briefly). Under g_lock.
+// Monitors looked up since TeamSpeak last stopped capturing windows. Under g_lock; never
+// destroyed (see window_capture.cpp). Not refreshed during a stream: enumerating DXGI outputs
+// goes through the same system-wide display lock as QueryDisplayConfig (see converter.cpp).
+std::map<HMONITOR, MonitorState>& g_monitors = *new std::map<HMONITOR, MonitorState>;
+
+// Whether a monitor is in HDR mode, and its DXGI output. Under g_lock.
 const MonitorState& LookupMonitor(HMONITOR monitor)
 {
-    static auto& cache = *new std::map<HMONITOR, MonitorState>; // never destroyed (see window_capture.cpp)
-    MonitorState& m = cache[monitor];
-    const ULONGLONG now = GetTickCount64();
-    if (m.checked && now - m.checked < kMonitorCacheMs)
-        return m;
-    m = MonitorState{now};
-    if (FindOutputForMonitor(monitor, m.desc))
-        m.hdr = IsHdrColorSpace(m.desc.ColorSpace);
-    return m;
+    auto [it, added] = g_monitors.try_emplace(monitor);
+    if (added && FindOutputForMonitor(monitor, it->second.desc))
+        it->second.hdr = IsHdrColorSpace(it->second.desc.ColorSpace);
+    return it->second;
 }
 
 // ---- Windows TeamSpeak captures ------------------------------------------------------
@@ -134,6 +132,8 @@ DWORD WINAPI SweepThread(void*)
                 ++it;
             }
         }
+        if (g_windows.empty())
+            g_monitors.clear(); // no stream: look again next time (HDR may have been toggled)
     }
 }
 
@@ -213,16 +213,18 @@ WindowCapture* ActiveCapture(HWND hwnd, HMONITOR monitor, const MonitorState& mo
 // Overwrites what GDI just drew into dc's DIB with our converted capture of the window.
 // (dstX, dstY, w, h): destination rectangle; (srcX, srcY): its origin in window coordinates
 // (relative to GetWindowRect), which is what PrintWindow and window-DC BitBlt use.
-void ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY)
+// With `instead`, GDI hasn't drawn anything: only a capture that's already running is used,
+// and whatever our frame doesn't cover is filled with black. Returns true if it drew.
+bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY, bool instead)
 {
     if (!IsWindow(hwnd) || IsIconic(hwnd) || GetAncestor(hwnd, GA_ROOT) != hwnd)
-        return;
+        return false;
 
     DIBSECTION ds{};
     HGDIOBJ bitmap = GetCurrentObject(dc, OBJ_BITMAP);
     if (!bitmap || GetObjectW(bitmap, sizeof(ds), &ds) != sizeof(ds) || ds.dsBm.bmBitsPixel != 32 || !ds.dsBm.bmBits) {
         Verbose("skip: not a 32-bit DIB", hwnd);
-        return; // not a 32-bpp DIB section: not a capture
+        return false; // not a 32-bpp DIB section: not a capture
     }
     char diag[200] = "";
     if (VerboseLogOn())
@@ -236,15 +238,20 @@ void ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
     if (!mon.hdr) {
         g_windows.erase(hwnd); // e.g. moved to an SDR monitor: GDI is already correct there
         Verbose("skip: SDR monitor", hwnd, diag);
-        return;
+        return false;
+    }
+    if (instead) {
+        const auto it = g_windows.find(hwnd);
+        if (it == g_windows.end() || !it->second.capture)
+            return false; // not streaming yet: GDI captures, and the normal path takes over
     }
     WindowCapture* capture = ActiveCapture(hwnd, monitor, mon, diag);
     if (!capture)
-        return;
+        return false;
     const WindowCapture::Frame f = capture->Current();
     if (!f.data) {
         Verbose("skip: no frame yet", hwnd, diag);
-        return;
+        return false;
     }
 
     // WGC frames start at the window's visible bounds; GDI coordinates at GetWindowRect,
@@ -257,13 +264,13 @@ void ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
     const int offY = wr.top + srcY - visible.top - dstY;
 
     const int dibW = ds.dsBm.bmWidth, dibH = ds.dsBm.bmHeight;
-    const int x0 = std::max({dstX, 0, -offX});
-    const int x1 = std::min({dstX + std::min(w, dibW), dibW, int(f.width) - offX});
-    const int y0 = std::max({dstY, 0, -offY});
-    const int y1 = std::min({dstY + std::min(h, dibH), dibH, int(f.height) - offY});
+    const int dx0 = std::max(dstX, 0), dx1 = std::min(dstX + std::min(w, dibW), dibW); // destination
+    const int dy0 = std::max(dstY, 0), dy1 = std::min(dstY + std::min(h, dibH), dibH);
+    const int x0 = std::max(dx0, -offX), x1 = std::min(dx1, int(f.width) - offX); // ...covered by our frame
+    const int y0 = std::max(dy0, -offY), y1 = std::min(dy1, int(f.height) - offY);
     if (x0 >= x1 || y0 >= y1) {
         Verbose("skip: no overlap", hwnd, diag);
-        return;
+        return false;
     }
 
     // GDI copies the region straight out of the read-back frame. The source is described
@@ -276,8 +283,11 @@ void ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
     const int sx = x0 + offX, sy = y0 + offY; // region's top-left in the frame
     if (size_t(sy + ch) * f.pitch > f.bytes) {
         Verbose("skip: unexpected frame layout", hwnd, diag);
-        return;
+        return false;
     }
+    // E.g. the invisible resize borders, which our frame doesn't include.
+    if (instead && (x0 != dx0 || y0 != dy0 || x1 != dx1 || y1 != dy1))
+        PatBlt(dc, dx0, dy0, dx1 - dx0, dy1 - dy0, BLACKNESS);
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
     bi.bmiHeader.biWidth = static_cast<LONG>(f.pitch / 4);
@@ -289,7 +299,9 @@ void ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
     GdiFlush(); // the frame memory is only valid until the next update
 
     if (VerboseLogOn())
-        Verbose("replaced", hwnd, (std::string(diag) + " -> ours " + DibAverage(ds)).c_str());
+        Verbose(instead ? "drawn instead of PrintWindow" : "replaced", hwnd,
+                (std::string(diag) + " -> ours " + DibAverage(ds)).c_str());
+    return true;
 }
 
 // ---- Hooks -------------------------------------------------------------------------
@@ -300,26 +312,31 @@ PrintWindowFn g_origPrintWindow = nullptr;
 BitBltFn g_origBitBlt = nullptr;
 thread_local bool t_inFix = false; // our own GDI calls must not re-enter the fix
 
-void ReplacePixelsCatch(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY)
+bool ReplacePixelsCatch(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY,
+                        bool instead)
 {
     try {
-        ReplacePixels(hwnd, dc, dstX, dstY, w, h, srcX, srcY);
+        return ReplacePixels(hwnd, dc, dstX, dstY, w, h, srcX, srcY, instead);
     } catch (const std::exception& e) {
         Log("window fix: unexpected error after %s: %s", api, e.what());
     } catch (...) {
         Log("window fix: unexpected error after %s", api);
     }
+    return false;
 }
 
 // Last line of defence: a crash in our code must not take TeamSpeak down. GDI's own output
 // stays in place, the lock is released, and the fix stays off until TeamSpeak restarts.
-void ReplacePixelsGuarded(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY)
+// Returns true if our frame was drawn.
+bool ReplacePixelsGuarded(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY,
+                          bool instead = false)
 {
     if (t_inFix || g_crashed || !Cfg().enabled || !Cfg().fixWindowCapture)
-        return;
+        return false;
+    bool drawn = false;
     t_inFix = true;
     __try {
-        ReplacePixelsCatch(api, hwnd, dc, dstX, dstY, w, h, srcX, srcY);
+        drawn = ReplacePixelsCatch(api, hwnd, dc, dstX, dstY, w, h, srcX, srcY, instead);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_crashed = true; // before releasing the lock: whoever gets it next must see this
         ReleaseLockAfterCrash();
@@ -327,10 +344,16 @@ void ReplacePixelsGuarded(const char* api, HWND hwnd, HDC dc, int dstX, int dstY
             api);
     }
     t_inFix = false;
+    return drawn;
 }
 
 BOOL WINAPI HookPrintWindow(HWND hwnd, HDC dc, UINT flags)
 {
+    // Already streaming this window: draw our frame without asking DWM for one. With
+    // PW_RENDERFULLCONTENT, PrintWindow waits for DWM's next composition (~17 ms at 60 Hz),
+    // which with our work on top kept the stream below 60 fps.
+    if (!(flags & PW_CLIENTONLY) && ReplacePixelsGuarded("PrintWindow", hwnd, dc, 0, 0, INT_MAX, INT_MAX, 0, 0, true))
+        return TRUE;
     const BOOL ok = g_origPrintWindow(hwnd, dc, flags);
     if (!t_inFix && VerboseLogOn()) {
         char what[48];

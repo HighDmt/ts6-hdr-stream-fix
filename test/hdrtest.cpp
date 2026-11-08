@@ -460,9 +460,11 @@ HdrWindow ShowHdrWindow(ID3D11Device* dev, const RECT& monitor, double sdrWhite)
 }
 
 // Captures the window like WebRTC's GDI window capturer, several times in a row (a stream).
-bool CaptureWindowGdi(HWND hwnd, bool usePrintWindow, bool bottomUp, Frame& out, POINT& clientOffset)
+// callMs: median time of the GDI call once the stream is running (the last 5 captures).
+bool CaptureWindowGdi(HWND hwnd, bool usePrintWindow, bool bottomUp, Frame& out, POINT& clientOffset, double& callMs)
 {
     bool ok = false;
+    std::vector<double> times;
     for (int i = 0; i < 10; ++i) {
         RECT wr;
         GetWindowRect(hwnd, &wr);
@@ -478,9 +480,15 @@ bool CaptureWindowGdi(HWND hwnd, bool usePrintWindow, bool bottomUp, Frame& out,
         void* bits = nullptr;
         HBITMAP bmp = CreateDIBSection(windowDc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
         HGDIOBJ old = SelectObject(mem, bmp);
+        LARGE_INTEGER t0, t1, freq;
+        QueryPerformanceCounter(&t0);
         ok = usePrintWindow ? PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT)
                             : BitBlt(mem, 0, 0, w, h, windowDc, 0, 0, SRCCOPY);
         GdiFlush();
+        QueryPerformanceCounter(&t1);
+        QueryPerformanceFrequency(&freq);
+        if (i >= 5)
+            times.push_back(1000.0 * (t1.QuadPart - t0.QuadPart) / freq.QuadPart);
         if (ok) {
             out.width = w;
             out.height = h;
@@ -500,6 +508,8 @@ bool CaptureWindowGdi(HWND hwnd, bool usePrintWindow, bool bottomUp, Frame& out,
         ReleaseDC(hwnd, windowDc);
         PumpMessages(33);
     }
+    std::sort(times.begin(), times.end());
+    callMs = times[times.size() / 2];
     return ok;
 }
 
@@ -518,7 +528,8 @@ int RunWindowTest(HWND hwnd, bool withFix, const FixParams& fp, const fs::path& 
         const char* name = c.name;
         Frame f;
         POINT origin{};
-        if (!CaptureWindowGdi(hwnd, c.usePrint, c.bottomUp, f, origin)) {
+        double callMs = 0;
+        if (!CaptureWindowGdi(hwnd, c.usePrint, c.bottomUp, f, origin, callMs)) {
             printf("  %-26s FAILED\n", name);
             failures += withFix ? 1 : 0;
             continue;
@@ -527,7 +538,7 @@ int RunWindowTest(HWND hwnd, bool withFix, const FixParams& fp, const fs::path& 
         printf("  %-28s measured:    ", name);
         for (double x : m)
             printf("%9.1f", x);
-        printf("\n");
+        printf("   (%.1f ms per capture)\n", callMs);
         if (withFix) {
             bool pass = true;
             printf("  %-28s expected:    ", "");

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(hdrfix VERSION 1.1.0 LANGUAGES C CXX RC)
+project(hdrfix VERSION 1.1.1 LANGUAGES C CXX RC)
 
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "hdrfix must be built with MSVC for x64")
