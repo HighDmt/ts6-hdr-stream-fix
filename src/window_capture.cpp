@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 
 namespace wgc = winrt::Windows::Graphics::Capture;
 namespace wgd = winrt::Windows::Graphics::DirectX;
@@ -19,7 +20,10 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-constexpr ULONGLONG kFirstFrameWaitMs = 250;
+// WGC delivers a frame per window update, e.g. 144+ per second for a game, each an FP16 copy
+// made by DWM on the game's GPU. TeamSpeak streams at most 60 fps: a ~80 fps cap leaves
+// margin for timing jitter and skips the copies nobody uses. (Windows 11 24H2 and later.)
+constexpr std::chrono::milliseconds kMinFrameInterval{12};
 constexpr auto kFormat = wgd::DirectXPixelFormat::R16G16B16A16Float;
 
 // One D3D11 device for all window captures, used under the caller's lock.
@@ -130,25 +134,12 @@ struct WindowCapture::Impl {
         b.mapped = true;
         if (current >= 0)
             Unmap(buffers[current]);
+        else
+            Log("window fix: first frame %ux%u, row pitch %u, %u bytes", b.width, b.height, b.map.RowPitch,
+                b.map.DepthPitch);
         current = pending;
         pending = -1;
         return true;
-    }
-
-    // Newest frame from WGC, or null if the window hasn't changed. Waits a little for the
-    // very first one, which takes a moment to arrive after StartCapture.
-    wgc::Direct3D11CaptureFrame NewestFrame()
-    {
-        wgc::Direct3D11CaptureFrame latest{nullptr};
-        const bool first = current < 0 && pending < 0;
-        const ULONGLONG deadline = GetTickCount64() + (first ? kFirstFrameWaitMs : 0);
-        for (;;) {
-            while (auto frame = pool.TryGetNextFrame())
-                latest = frame; // older frames go back to the pool
-            if (latest || GetTickCount64() >= deadline)
-                return latest;
-            Sleep(5);
-        }
     }
 
     bool Update()
@@ -157,7 +148,11 @@ struct WindowCapture::Impl {
         if (!CollectPending(false))
             return false;
 
-        wgc::Direct3D11CaptureFrame latest = NewestFrame();
+        // Newest frame from WGC; older ones go back to the pool. Never waits: until the first
+        // frame is ready, TeamSpeak's own capture is used.
+        wgc::Direct3D11CaptureFrame latest{nullptr};
+        while (auto frame = pool.TryGetNextFrame())
+            latest = frame;
         if (!latest)
             return true; // nothing new: keep the current frame
         const auto size = latest.ContentSize();
@@ -207,15 +202,6 @@ struct WindowCapture::Impl {
         b.width = std::min<UINT>(size.Width, d.Width);
         b.height = std::min<UINT>(size.Height, d.Height);
         pending = static_cast<int>(&b - buffers);
-
-        // The first frame: wait for it, so the stream doesn't start with an unconverted one.
-        if (current >= 0)
-            return true;
-        if (!CollectPending(true))
-            return false;
-        const Readback& first = buffers[current];
-        Log("window fix: first frame %ux%u, row pitch %u, %u bytes", first.width, first.height, first.map.RowPitch,
-            first.map.DepthPitch);
         return true;
     }
 };
@@ -223,8 +209,8 @@ struct WindowCapture::Impl {
 WindowCapture::WindowCapture(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 WindowCapture::~WindowCapture() = default;
 
-std::unique_ptr<WindowCapture> WindowCapture::Start(HWND hwnd, const DXGI_OUTPUT_DESC1& output, const wchar_t* label,
-                                                    const char*& step, HRESULT& hr)
+std::unique_ptr<WindowCapture> WindowCapture::Start(HWND hwnd, const DXGI_OUTPUT_DESC1& output, float sdrWhiteNits,
+                                                    const wchar_t* label, const char*& step, HRESULT& hr)
 {
     hr = E_FAIL;
     try {
@@ -233,7 +219,7 @@ std::unique_ptr<WindowCapture> WindowCapture::Start(HWND hwnd, const DXGI_OUTPUT
             return nullptr;
         auto s = std::make_unique<Impl>();
         step = "converter setup";
-        if (!s->converter.Init(g_dev.device.Get(), output, DXGI_FORMAT_B8G8R8A8_UNORM))
+        if (!s->converter.Init(g_dev.device.Get(), output, DXGI_FORMAT_B8G8R8A8_UNORM, sdrWhiteNits))
             return nullptr;
 
         step = "CreateForWindow";
@@ -252,6 +238,10 @@ std::unique_ptr<WindowCapture> WindowCapture::Start(HWND hwnd, const DXGI_OUTPUT
         try {
             s->session.IsCursorCaptureEnabled(false); // GDI captures don't include the cursor either
             s->session.IsBorderRequired(false);       // Windows 11 only; Windows 10 shows a yellow border
+        } catch (...) {
+        }
+        try {
+            s->session.MinUpdateInterval(kMinFrameInterval); // Windows 11 24H2+ only
         } catch (...) {
         }
         step = "StartCapture";

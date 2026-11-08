@@ -135,7 +135,8 @@ bool TryIntercept(IDXGIOutput* output, IUnknown* device, UINT flags, DXGI_FORMAT
         return false;
     }
 
-    IDXGIOutputDuplication* wrapper = DuplicationWrapper::Create(inner.Get(), d3d.Get(), od, outFormat);
+    IDXGIOutputDuplication* wrapper =
+        DuplicationWrapper::Create(inner.Get(), d3d.Get(), od, outFormat, SdrWhiteNitsFor(od));
     if (!wrapper) {
         Log("%s on %ls: converter setup failed, passing through", api, od.DeviceName);
         return false;

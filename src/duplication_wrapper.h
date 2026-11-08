@@ -11,7 +11,7 @@ class DuplicationWrapper final : public IDXGIOutputDuplication {
 public:
     // Returns a new wrapper (refcount 1), or nullptr if the converter can't be set up.
     static IDXGIOutputDuplication* Create(IDXGIOutputDuplication* inner, ID3D11Device* device,
-                                          const DXGI_OUTPUT_DESC1& output, DXGI_FORMAT outFormat);
+                                          const DXGI_OUTPUT_DESC1& output, DXGI_FORMAT outFormat, float sdrWhiteNits);
 
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override;
@@ -45,6 +45,5 @@ private:
     Microsoft::WRL::ComPtr<IDXGIOutputDuplication> inner_;
     Converter converter_;
     DXGI_FORMAT outFormat_;
-    bool loggedFirstFrame_ = false;
-    bool reportedSuccess_ = false;
+    bool hadGoodFrame_ = false;
 };

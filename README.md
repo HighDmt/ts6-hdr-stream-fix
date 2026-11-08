@@ -52,11 +52,10 @@ TeamSpeak loads `version.dll` from its own folder automatically. Nothing else to
 Open `hdrfix.log` in the TeamSpeak folder. After starting TeamSpeak you should see:
 
 ```
-hdrfix 1.1.1 loaded into TeamSpeak.exe (Windows 10.0 build 26100)
+hdrfix 1.1.2 loaded into TeamSpeak.exe (Windows 10.0 build 26100)
 hook IDXGIOutput1::DuplicateOutput (vtable slot 22, ...): installed
 hook IDXGIOutput5::DuplicateOutput1 (vtable slot 26, ...): installed
 hook PrintWindow: installed
-hook BitBlt: installed
 ```
 
 Sharing a screen adds:
@@ -157,17 +156,20 @@ contains no user names, file paths or window titles. It does contain window clas
 ## Limitations
 
 - Only the TeamSpeak 6 desktop client on Windows x64. It relies on how TeamSpeak captures
-  today (DXGI Desktop Duplication for screens, GDI `PrintWindow`/`BitBlt` for single
-  apps). If a TeamSpeak update changes that, hdrfix stops having an effect (the log then
+  today (DXGI Desktop Duplication for screens, GDI `PrintWindow` for single apps). If a TeamSpeak update changes that, hdrfix stops having an effect (the log then
   shows no `intercepted` / `window fix` lines) until it's updated.
 - Sharing a single app costs more than sharing a screen: hdrfix captures the app a
-  second time in HDR and copies each frame back to the CPU (about 15 MB per frame for a
-  1440p window). In exchange, once a stream is running hdrfix skips TeamSpeak's own
-  `PrintWindow` capture (which waits for the next screen refresh, about 17 ms at 60 Hz),
-  so app sharing runs faster than without hdrfix. The copy runs one frame ahead, so
-  TeamSpeak doesn't wait for the GPU, and the shared app runs one frame (about 17 ms at
-  60 fps) behind the screen. Full-screen
-  sharing adds one GPU pass per frame, well under a millisecond on a modern GPU.
+  second time in HDR (at most ~80 fps on Windows 11 24H2 and later) and copies each frame
+  back to the CPU (about 15 MB per frame for a 1440p window). In exchange, once a stream
+  is running hdrfix skips TeamSpeak's own `PrintWindow` capture (which waits for the next
+  screen refresh, about 17 ms at 60 Hz), so app sharing runs faster than without hdrfix.
+  The copy runs one frame ahead, so TeamSpeak doesn't wait for the GPU, and the shared
+  app runs one frame (about 17 ms at 60 fps) behind the screen. Full-screen sharing adds
+  one GPU pass per frame, well under a millisecond on a modern GPU.
+- The SDR content brightness and the monitor's HDR state are read when a share starts,
+  never during it: reading them takes a system-wide display lock that makes games
+  stutter. Changing the slider, or turning HDR on or off, applies from the next share
+  (an app share started in HDR comes out too dark after turning HDR off).
 - HDR content brighter than your desktop's white is compressed or clipped (see `knee`).
 
 ## How it works
@@ -179,7 +181,7 @@ With HDR on, Windows composes the desktop in **scRGB**: linear light, 16-bit flo
 TeamSpeak captures screens with DXGI Desktop Duplication. On an HDR display Windows
 hands it a frame converted by clipping at 1.0 (80 nits): everything brighter than 80 nits
 becomes white and everything else is ~3x too bright. Sharing a single app uses GDI
-(`PrintWindow` / `BitBlt`), which is fine for normal windows, but apps that render in HDR
+(`PrintWindow`), which is fine for normal windows, but apps that render in HDR
 when Windows HDR is on (Chrome, Edge, Electron apps, games) are clipped the same way.
 
 1. **Loading.** TeamSpeak.exe imports `version.dll`, which isn't a protected "KnownDLL",
@@ -190,11 +192,12 @@ when Windows HDR is on (Chrome, Edge, Electron apps, games) are clipped the same
    an HDR monitor, the hook asks Windows for the raw FP16 frames instead and returns a
    wrapper whose `AcquireNextFrame` converts each frame on TeamSpeak's own GPU device
    with [`src/hdr_to_sdr.hlsl`](src/hdr_to_sdr.hlsl):
-   - scale by `80 / SDR white` (read from Windows once per second), so SDR white = 1.0
+   - scale by `80 / SDR white` (read from Windows when the share starts), so SDR white = 1.0
    - optional highlight roll-off above `knee` (extended Reinhard on max(R,G,B), so hues
      don't shift)
    - sRGB-encode into the 8-bit format TeamSpeak expects
-3. **App sharing.** `PrintWindow` and `BitBlt` are hooked too. Once TeamSpeak has captured
+3. **App sharing.** `PrintWindow` is hooked too. TeamSpeak calls it for the shared window
+   and for its popups (menus, tooltips) once per stream frame. Once TeamSpeak has captured
    the same window 3 times within 2 s on an HDR monitor, hdrfix captures that window
    itself with Windows.Graphics.Capture in FP16 (unclipped), converts it with the same
    shader, and overwrites the pixels GDI just produced. From then on, `PrintWindow` calls
@@ -257,7 +260,7 @@ dist\test\hdrtest.exe
 Needs an HDR monitor with HDR turned on. For about 10 seconds it shows test windows on
 that monitor and nudges the mouse cursor by 1 pixel. It captures grey patches with every
 method TeamSpeak uses (three desktop duplication variants, `PrintWindow` into top-down and
-bottom-up bitmaps, `BitBlt`), first without and then with `..\version.dll` loaded, and
+bottom-up bitmaps), first without and then with `..\version.dll` loaded, and
 compares the results with the values the fix should produce. It also checks that the
 `version.dll` forwarding works. PNGs of every capture go to `.\hdrtest_out\`.
 

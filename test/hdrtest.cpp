@@ -390,7 +390,7 @@ int RunVariants(IDXGIOutput5* output, ID3D11Device* dev, POINT origin, bool with
 //
 // A window rendered the way Chrome renders with HDR on: an scRGB FP16 flip-model swap
 // chain, SDR content at the SDR white level. Captured like TeamSpeak's GDI window
-// capturer: a 32-bpp DIB of GetWindowRect's size, filled by PrintWindow or BitBlt.
+// capturer: a 32-bpp DIB of GetWindowRect's size, filled by PrintWindow.
 
 struct HdrWindow {
     HWND hwnd = nullptr;
@@ -461,7 +461,7 @@ HdrWindow ShowHdrWindow(ID3D11Device* dev, const RECT& monitor, double sdrWhite)
 
 // Captures the window like WebRTC's GDI window capturer, several times in a row (a stream).
 // callMs: median time of the GDI call once the stream is running (the last 5 captures).
-bool CaptureWindowGdi(HWND hwnd, bool usePrintWindow, bool bottomUp, Frame& out, POINT& clientOffset, double& callMs)
+bool CaptureWindowGdi(HWND hwnd, bool bottomUp, Frame& out, POINT& clientOffset, double& callMs)
 {
     bool ok = false;
     std::vector<double> times;
@@ -482,8 +482,7 @@ bool CaptureWindowGdi(HWND hwnd, bool usePrintWindow, bool bottomUp, Frame& out,
         HGDIOBJ old = SelectObject(mem, bmp);
         LARGE_INTEGER t0, t1, freq;
         QueryPerformanceCounter(&t0);
-        ok = usePrintWindow ? PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT)
-                            : BitBlt(mem, 0, 0, w, h, windowDc, 0, 0, SRCCOPY);
+        ok = PrintWindow(hwnd, mem, PW_RENDERFULLCONTENT);
         GdiFlush();
         QueryPerformanceCounter(&t1);
         QueryPerformanceFrequency(&freq);
@@ -520,16 +519,15 @@ int RunWindowTest(HWND hwnd, bool withFix, const FixParams& fp, const fs::path& 
     struct Case {
         const char* name;
         const char* file;
-        bool usePrint, bottomUp;
+        bool bottomUp;
     };
-    for (const Case c : {Case{"PrintWindow, top-down DIB", "app_printwindow_topdown", true, false},
-                         Case{"PrintWindow, bottom-up DIB", "app_printwindow_bottomup", true, true},
-                         Case{"BitBlt(window DC)", "app_bitblt", false, false}}) {
+    for (const Case c : {Case{"PrintWindow, top-down DIB", "app_printwindow_topdown", false},
+                         Case{"PrintWindow, bottom-up DIB", "app_printwindow_bottomup", true}}) {
         const char* name = c.name;
         Frame f;
         POINT origin{};
         double callMs = 0;
-        if (!CaptureWindowGdi(hwnd, c.usePrint, c.bottomUp, f, origin, callMs)) {
+        if (!CaptureWindowGdi(hwnd, c.bottomUp, f, origin, callMs)) {
             printf("  %-26s FAILED\n", name);
             failures += withFix ? 1 : 0;
             continue;

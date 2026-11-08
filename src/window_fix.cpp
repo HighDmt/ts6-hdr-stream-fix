@@ -1,5 +1,6 @@
 #include "window_fix.h"
 
+#include "converter.h"
 #include "display_info.h"
 #include "log_config.h"
 #include "verbose_log.h"
@@ -10,7 +11,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <climits>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -82,30 +82,43 @@ void Verbose(const char* what, HWND hwnd, const char* detail = nullptr)
 
 struct MonitorState {
     bool hdr = false;
+    float sdrWhiteNits = 0;
     DXGI_OUTPUT_DESC1 desc{};
 };
 
 // Monitors looked up since TeamSpeak last stopped capturing windows. Under g_lock; never
 // destroyed (see window_capture.cpp). Not refreshed during a stream: enumerating DXGI outputs
-// goes through the same system-wide display lock as QueryDisplayConfig (see converter.cpp).
+// and reading the SDR white level take a system-wide display lock that makes games stutter
+// (see converter.cpp). So a stream keeps the HDR state and SDR white it started with.
 std::map<HMONITOR, MonitorState>& g_monitors = *new std::map<HMONITOR, MonitorState>;
 
-// Whether a monitor is in HDR mode, and its DXGI output. Under g_lock.
+// Whether a monitor is in HDR mode, its DXGI output and SDR white level. Under g_lock.
 const MonitorState& LookupMonitor(HMONITOR monitor)
 {
     auto [it, added] = g_monitors.try_emplace(monitor);
-    if (added && FindOutputForMonitor(monitor, it->second.desc))
-        it->second.hdr = IsHdrColorSpace(it->second.desc.ColorSpace);
-    return it->second;
+    MonitorState& m = it->second;
+    if (added && FindOutputForMonitor(monitor, m.desc) && IsHdrColorSpace(m.desc.ColorSpace)) {
+        m.hdr = true;
+        m.sdrWhiteNits = SdrWhiteNitsFor(m.desc);
+    }
+    return m;
 }
 
 // ---- Windows TeamSpeak captures ------------------------------------------------------
+//
+// TeamSpeak captures the shared window and its popups (menus, tooltips, ...) once per
+// stream frame. Each such window is in one of these states:
+//   counting   no capture: calls are counted until there are enough for a stream
+//              (a one-off thumbnail in the share picker never gets that far)
+//   streaming  `capture` is set and our frames replace GDI's
+//   waiting    after a failure: GDI's output is left alone until retryAfter, then counting
+// The sweeper forgets a window (closing its capture) 3 s after TeamSpeak's last call.
 
 struct Tracked {
-    ULONGLONG burstStart = 0; // activation heuristic
+    ULONGLONG burstStart = 0; // counting
     int burstCalls = 0;
     ULONGLONG lastUse = 0;
-    ULONGLONG retryAfter = 0; // after a failure, leave GDI output alone until then
+    ULONGLONG retryAfter = 0; // waiting
     std::wstring className;   // for the log, also after the window is gone
     HMONITOR monitor = nullptr; // where the capture was started
     std::unique_ptr<WindowCapture> capture;
@@ -114,7 +127,6 @@ struct Tracked {
 // Captured recently, on HDR monitors. Under g_lock; never destroyed (see window_capture.cpp).
 std::map<HWND, Tracked>& g_windows = *new std::map<HWND, Tracked>;
 
-// Forgets windows (and closes our captures) once TeamSpeak stops asking for them.
 DWORD WINAPI SweepThread(void*)
 {
     for (;;) {
@@ -165,7 +177,7 @@ std::string DibAverage(const DIBSECTION& ds)
     return buf;
 }
 
-// Starts or updates our capture of hwnd. Returns it if it has a frame to use. Under g_lock.
+// Starts or updates our capture of hwnd. Returns it if it's streaming. Under g_lock.
 WindowCapture* ActiveCapture(HWND hwnd, HMONITOR monitor, const MonitorState& mon, const char* diag)
 {
     Tracked& t = g_windows[hwnd];
@@ -192,7 +204,7 @@ WindowCapture* ActiveCapture(HWND hwnd, HMONITOR monitor, const MonitorState& mo
         t.monitor = monitor;
         const char* step = "?";
         HRESULT hr = E_FAIL;
-        t.capture = WindowCapture::Start(hwnd, mon.desc, t.className.c_str(), step, hr);
+        t.capture = WindowCapture::Start(hwnd, mon.desc, mon.sdrWhiteNits, t.className.c_str(), step, hr);
         if (!t.capture) {
             Log("window fix: could not capture '%ls' (%s failed, hr=0x%08lX), retrying in %llu s",
                 t.className.c_str(), step, static_cast<unsigned long>(hr), kRetryMs / 1000);
@@ -210,13 +222,20 @@ WindowCapture* ActiveCapture(HWND hwnd, HMONITOR monitor, const MonitorState& mo
     return t.capture.get();
 }
 
-// Overwrites what GDI just drew into dc's DIB with our converted capture of the window.
-// (dstX, dstY, w, h): destination rectangle; (srcX, srcY): its origin in window coordinates
-// (relative to GetWindowRect), which is what PrintWindow and window-DC BitBlt use.
-// With `instead`, GDI hasn't drawn anything: only a capture that's already running is used,
-// and whatever our frame doesn't cover is filled with black. Returns true if it drew.
-bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY, bool instead)
+// Draws our converted capture of hwnd into dc's DIB, which PrintWindow fills with the whole
+// window (DIB pixel 0,0 = GetWindowRect's top-left).
+// After PrintWindow (instead = false): overwrites GDI's clipped pixels, and starts our capture
+// once the window looks streamed. In place of PrintWindow (instead = true): only a capture
+// that's already streaming is used, and what our frame doesn't cover is filled with black.
+// Returns true if it drew.
+bool ReplacePixels(HWND hwnd, HDC dc, bool instead)
 {
+    if (instead) { // cheap early out for windows that aren't streamed (e.g. share-picker thumbnails)
+        Lock lock;
+        const auto it = g_windows.find(hwnd);
+        if (it == g_windows.end() || !it->second.capture)
+            return false;
+    }
     if (!IsWindow(hwnd) || IsIconic(hwnd) || GetAncestor(hwnd, GA_ROOT) != hwnd)
         return false;
 
@@ -226,10 +245,9 @@ bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
         Verbose("skip: not a 32-bit DIB", hwnd);
         return false; // not a 32-bpp DIB section: not a capture
     }
-    char diag[200] = "";
+    char diag[160] = "";
     if (VerboseLogOn())
-        snprintf(diag, sizeof(diag), "dib %dx%d dst %d,%d src %d,%d gdi %s", ds.dsBm.bmWidth, ds.dsBm.bmHeight, dstX,
-                 dstY, srcX, srcY, DibAverage(ds).c_str());
+        snprintf(diag, sizeof(diag), "dib %dx%d gdi %s", ds.dsBm.bmWidth, ds.dsBm.bmHeight, DibAverage(ds).c_str());
 
     const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     Lock lock;
@@ -239,11 +257,6 @@ bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
         g_windows.erase(hwnd); // e.g. moved to an SDR monitor: GDI is already correct there
         Verbose("skip: SDR monitor", hwnd, diag);
         return false;
-    }
-    if (instead) {
-        const auto it = g_windows.find(hwnd);
-        if (it == g_windows.end() || !it->second.capture)
-            return false; // not streaming yet: GDI captures, and the normal path takes over
     }
     WindowCapture* capture = ActiveCapture(hwnd, monitor, mon, diag);
     if (!capture)
@@ -260,14 +273,12 @@ bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
     GetWindowRect(hwnd, &wr);
     if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &visible, sizeof(visible))))
         visible = wr;
-    const int offX = wr.left + srcX - visible.left - dstX; // frame x = destination x + offX
-    const int offY = wr.top + srcY - visible.top - dstY;
+    const int offX = wr.left - visible.left; // frame x = DIB x + offX
+    const int offY = wr.top - visible.top;
 
     const int dibW = ds.dsBm.bmWidth, dibH = ds.dsBm.bmHeight;
-    const int dx0 = std::max(dstX, 0), dx1 = std::min(dstX + std::min(w, dibW), dibW); // destination
-    const int dy0 = std::max(dstY, 0), dy1 = std::min(dstY + std::min(h, dibH), dibH);
-    const int x0 = std::max(dx0, -offX), x1 = std::min(dx1, int(f.width) - offX); // ...covered by our frame
-    const int y0 = std::max(dy0, -offY), y1 = std::min(dy1, int(f.height) - offY);
+    const int x0 = std::max(0, -offX), x1 = std::min(dibW, int(f.width) - offX); // DIB area our frame covers
+    const int y0 = std::max(0, -offY), y1 = std::min(dibH, int(f.height) - offY);
     if (x0 >= x1 || y0 >= y1) {
         Verbose("skip: no overlap", hwnd, diag);
         return false;
@@ -286,8 +297,8 @@ bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
         return false;
     }
     // E.g. the invisible resize borders, which our frame doesn't include.
-    if (instead && (x0 != dx0 || y0 != dy0 || x1 != dx1 || y1 != dy1))
-        PatBlt(dc, dx0, dy0, dx1 - dx0, dy1 - dy0, BLACKNESS);
+    if (instead && (x0 != 0 || y0 != 0 || x1 != dibW || y1 != dibH))
+        PatBlt(dc, 0, 0, dibW, dibH, BLACKNESS);
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
     bi.bmiHeader.biWidth = static_cast<LONG>(f.pitch / 4);
@@ -304,23 +315,20 @@ bool ReplacePixels(HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX
     return true;
 }
 
-// ---- Hooks -------------------------------------------------------------------------
+// ---- Hook ----------------------------------------------------------------------------
 
 using PrintWindowFn = BOOL(WINAPI*)(HWND, HDC, UINT);
-using BitBltFn = BOOL(WINAPI*)(HDC, int, int, int, int, HDC, int, int, DWORD);
 PrintWindowFn g_origPrintWindow = nullptr;
-BitBltFn g_origBitBlt = nullptr;
 thread_local bool t_inFix = false; // our own GDI calls must not re-enter the fix
 
-bool ReplacePixelsCatch(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY,
-                        bool instead)
+bool ReplacePixelsCatch(HWND hwnd, HDC dc, bool instead)
 {
     try {
-        return ReplacePixels(hwnd, dc, dstX, dstY, w, h, srcX, srcY, instead);
+        return ReplacePixels(hwnd, dc, instead);
     } catch (const std::exception& e) {
-        Log("window fix: unexpected error after %s: %s", api, e.what());
+        Log("window fix: unexpected error: %s", e.what());
     } catch (...) {
-        Log("window fix: unexpected error after %s", api);
+        Log("window fix: unexpected error");
     }
     return false;
 }
@@ -328,20 +336,18 @@ bool ReplacePixelsCatch(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, 
 // Last line of defence: a crash in our code must not take TeamSpeak down. GDI's own output
 // stays in place, the lock is released, and the fix stays off until TeamSpeak restarts.
 // Returns true if our frame was drawn.
-bool ReplacePixelsGuarded(const char* api, HWND hwnd, HDC dc, int dstX, int dstY, int w, int h, int srcX, int srcY,
-                          bool instead = false)
+bool ReplacePixelsGuarded(HWND hwnd, HDC dc, bool instead)
 {
     if (t_inFix || g_crashed || !Cfg().enabled || !Cfg().fixWindowCapture)
         return false;
     bool drawn = false;
     t_inFix = true;
     __try {
-        drawn = ReplacePixelsCatch(api, hwnd, dc, dstX, dstY, w, h, srcX, srcY, instead);
+        drawn = ReplacePixelsCatch(hwnd, dc, instead);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         g_crashed = true; // before releasing the lock: whoever gets it next must see this
         ReleaseLockAfterCrash();
-        Log("window fix: crashed (exception 0x%08lX after %s), turned off until TeamSpeak restarts", GetExceptionCode(),
-            api);
+        Log("window fix: crashed (exception 0x%08lX), turned off until TeamSpeak restarts", GetExceptionCode());
     }
     t_inFix = false;
     return drawn;
@@ -349,10 +355,12 @@ bool ReplacePixelsGuarded(const char* api, HWND hwnd, HDC dc, int dstX, int dstY
 
 BOOL WINAPI HookPrintWindow(HWND hwnd, HDC dc, UINT flags)
 {
+    if (flags & PW_CLIENTONLY) // client-area offsets aren't handled; TeamSpeak doesn't use it
+        return g_origPrintWindow(hwnd, dc, flags);
+
     // Already streaming this window: draw our frame without asking DWM for one. With
-    // PW_RENDERFULLCONTENT, PrintWindow waits for DWM's next composition (~17 ms at 60 Hz),
-    // which with our work on top kept the stream below 60 fps.
-    if (!(flags & PW_CLIENTONLY) && ReplacePixelsGuarded("PrintWindow", hwnd, dc, 0, 0, INT_MAX, INT_MAX, 0, 0, true))
+    // PW_RENDERFULLCONTENT, PrintWindow waits for DWM's next composition (~17 ms at 60 Hz).
+    if (ReplacePixelsGuarded(hwnd, dc, true))
         return TRUE;
     const BOOL ok = g_origPrintWindow(hwnd, dc, flags);
     if (!t_inFix && VerboseLogOn()) {
@@ -361,31 +369,8 @@ BOOL WINAPI HookPrintWindow(HWND hwnd, HDC dc, UINT flags)
         Verbose(what, hwnd);
     }
     if (ok)
-        ReplacePixelsGuarded("PrintWindow", hwnd, dc, 0, 0, INT_MAX, INT_MAX, 0, 0);
+        ReplacePixelsGuarded(hwnd, dc, false);
     return ok;
-}
-
-BOOL WINAPI HookBitBlt(HDC dst, int x, int y, int cx, int cy, HDC src, int x1, int y1, DWORD rop)
-{
-    const BOOL ok = g_origBitBlt(dst, x, y, cx, cy, src, x1, y1, rop);
-    if (ok && src && (rop & ~CAPTUREBLT) == SRCCOPY && !t_inFix) {
-        // Only blits from a window DC count; WindowFromDC is null for memory DCs.
-        HWND hwnd = WindowFromDC(src);
-        if (hwnd && hwnd != GetDesktopWindow()) {
-            Verbose("BitBlt from window DC", hwnd);
-            ReplacePixelsGuarded("BitBlt", hwnd, dst, x, y, cx, cy, x1, y1);
-        }
-    }
-    return ok;
-}
-
-void Hook(const wchar_t* module, const char* name, void* detour, void** original)
-{
-    HMODULE m = LoadLibraryW(module);
-    void* target = m ? reinterpret_cast<void*>(GetProcAddress(m, name)) : nullptr;
-    const MH_STATUS st = target ? MH_CreateHook(target, detour, original) : MH_ERROR_FUNCTION_NOT_FOUND;
-    const MH_STATUS en = st == MH_OK ? MH_EnableHook(target) : st;
-    Log("hook %s: %s", name, en == MH_OK ? "installed" : MH_StatusToString(en));
 }
 
 } // namespace
@@ -396,7 +381,13 @@ void InstallWindowCaptureHooks()
         Log("window fix: disabled in hdrfix.ini (fix_window_capture=0)");
         return;
     }
-    Hook(L"user32.dll", "PrintWindow", reinterpret_cast<void*>(&HookPrintWindow),
-         reinterpret_cast<void**>(&g_origPrintWindow));
-    Hook(L"gdi32.dll", "BitBlt", reinterpret_cast<void*>(&HookBitBlt), reinterpret_cast<void**>(&g_origBitBlt));
+    // GetProcAddress, not &PrintWindow: user32 is delay-loaded, so that would be the thunk.
+    HMODULE user32 = LoadLibraryW(L"user32.dll");
+    void* target = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "PrintWindow")) : nullptr;
+    MH_STATUS st = target ? MH_CreateHook(target, reinterpret_cast<void*>(&HookPrintWindow),
+                                          reinterpret_cast<void**>(&g_origPrintWindow))
+                          : MH_ERROR_FUNCTION_NOT_FOUND;
+    if (st == MH_OK)
+        st = MH_EnableHook(target);
+    Log("hook PrintWindow: %s", st == MH_OK ? "installed" : MH_StatusToString(st));
 }

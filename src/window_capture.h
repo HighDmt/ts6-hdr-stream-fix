@@ -11,17 +11,17 @@
 //
 // The readback is double-buffered: Update() starts copying the newest frame and makes the
 // one copied on the previous call current, so the caller (TeamSpeak's capture thread)
-// doesn't wait for the GPU. The stream therefore runs one capture behind the window.
-// Two exceptions wait: the very first frame (up to 250 ms, so it's used right away),
-// and a GPU so busy that the previous copy isn't done yet (a frame is never dropped).
+// doesn't wait for the GPU. The stream therefore runs one capture behind the window, and
+// the first frame is ready a capture or two after Start(). Update() only waits when the GPU
+// is so busy that the previous copy isn't done yet (a frame is never dropped).
 //
 // Not thread-safe: the caller serializes all calls (window_fix.cpp holds its lock).
 class WindowCapture {
 public:
     // Starts capturing hwnd. On failure returns nullptr with `step` naming what failed
     // and `hr` its error code. `label` is only used in the log.
-    static std::unique_ptr<WindowCapture> Start(HWND hwnd, const DXGI_OUTPUT_DESC1& output, const wchar_t* label,
-                                                const char*& step, HRESULT& hr);
+    static std::unique_ptr<WindowCapture> Start(HWND hwnd, const DXGI_OUTPUT_DESC1& output, float sdrWhiteNits,
+                                                const wchar_t* label, const char*& step, HRESULT& hr);
     ~WindowCapture();
 
     // Picks up new frames. Returns false (after logging why) if the capture is broken.

@@ -12,10 +12,11 @@ DuplicationWrapper::DuplicationWrapper(IDXGIOutputDuplication* inner, DXGI_FORMA
 }
 
 IDXGIOutputDuplication* DuplicationWrapper::Create(IDXGIOutputDuplication* inner, ID3D11Device* device,
-                                                   const DXGI_OUTPUT_DESC1& output, DXGI_FORMAT outFormat)
+                                                   const DXGI_OUTPUT_DESC1& output, DXGI_FORMAT outFormat,
+                                                   float sdrWhiteNits)
 {
     auto* wrapper = new (std::nothrow) DuplicationWrapper(inner, outFormat);
-    if (wrapper && !wrapper->converter_.Init(device, output, outFormat)) {
+    if (wrapper && !wrapper->converter_.Init(device, output, outFormat, sdrWhiteNits)) {
         wrapper->Release();
         return nullptr;
     }
@@ -88,14 +89,6 @@ HRESULT DuplicationWrapper::AcquireNextFrame(UINT timeoutMs, DXGI_OUTDUPL_FRAME_
     ComPtr<ID3D11Texture2D> desktop;
     ID3D11Texture2D* converted = nullptr;
     if (frame && SUCCEEDED(frame.As(&desktop))) {
-        if (!loggedFirstFrame_) {
-            D3D11_TEXTURE2D_DESC d;
-            desktop->GetDesc(&d);
-            Log("first frame: %ux%u format %d bind 0x%X misc 0x%X; SDR white %.0f nits, peak %.0f nits",
-                d.Width, d.Height, d.Format, d.BindFlags, d.MiscFlags, converter_.SdrWhiteNits(),
-                converter_.PeakNits());
-            loggedFirstFrame_ = true;
-        }
         // Pointer-only update (LastPresentTime == 0): the desktop didn't change, so the
         // last converted frame is still correct. Otherwise convert the new frame.
         VerboseCount(info->LastPresentTime.QuadPart == 0 ? "DXGI frame (cursor only)" : "DXGI frame");
@@ -112,9 +105,13 @@ HRESULT DuplicationWrapper::AcquireNextFrame(UINT timeoutMs, DXGI_OUTDUPL_FRAME_
         ReportConversionFailure(frame ? "frame conversion failed" : "no desktop frame");
         return DXGI_ERROR_ACCESS_LOST;
     }
-    if (!reportedSuccess_) {
+    if (!hadGoodFrame_) {
+        hadGoodFrame_ = true;
         ReportConversionSuccess();
-        reportedSuccess_ = true;
+        D3D11_TEXTURE2D_DESC d;
+        desktop->GetDesc(&d);
+        Log("first frame: %ux%u format %d bind 0x%X misc 0x%X; SDR white %.0f nits, peak %.0f nits", d.Width,
+            d.Height, d.Format, d.BindFlags, d.MiscFlags, converter_.SdrWhiteNits(), converter_.PeakNits());
     }
     return hr;
 }
