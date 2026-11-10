@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "../src/display_info.h"
+#include "reference_math.h"
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -35,31 +36,6 @@ constexpr int kPatchCount = static_cast<int>(std::size(kPatchValues));
 constexpr int kPatchSize = 200;
 constexpr int kMeasureInset = 50; // measure the middle of each patch only
 HWND g_patchWindow = nullptr;
-
-// ---- Reference math (same as the shader) ----------------------------------------
-
-double SrgbToLinear(double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); }
-double LinearToSrgb(double l)
-{
-    l = std::clamp(l, 0.0, 1.0);
-    return l <= 0.0031308 ? l * 12.92 : 1.055 * std::pow(l, 1.0 / 2.4) - 0.055;
-}
-
-struct FixParams {
-    double sdrWhite = 80, peak = 1000, knee = 0.75;
-};
-
-// Expected output of the fix for linear input m (1.0 = SDR white), linear result.
-double ExpectedLinear(double m, const FixParams& p)
-{
-    const double w = p.peak / p.sdrWhite;
-    if (p.knee >= 0.999 || w <= 1.0001 || m <= p.knee)
-        return std::min(m, 1.0);
-    const double W = (w - p.knee) / (1 - p.knee);
-    const double x = (m - p.knee) / (1 - p.knee);
-    const double y = std::min(x * (1 + x / (W * W)) / (1 + x), 1.0);
-    return p.knee + y * (1 - p.knee);
-}
 
 // ---- Patch window --------------------------------------------------------------
 

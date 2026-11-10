@@ -52,7 +52,7 @@ TeamSpeak loads `version.dll` from its own folder automatically. Nothing else to
 Open `hdrfix.log` in the TeamSpeak folder. After starting TeamSpeak you should see:
 
 ```
-hdrfix 1.1.2 loaded into TeamSpeak.exe (Windows 10.0 build 26100)
+hdrfix 1.1.3 loaded into TeamSpeak.exe (Windows 10.0 build 26100)
 hook IDXGIOutput1::DuplicateOutput (vtable slot 22, ...): installed
 hook IDXGIOutput5::DuplicateOutput1 (vtable slot 26, ...): installed
 hook PrintWindow: installed
@@ -268,6 +268,9 @@ Exit code 0 = all checks passed, 1 = a check failed, 2 = no HDR monitor found. U
 `--dll <path>` to test another build and `--out <folder>` for the PNGs. Keep `hdrtest.exe`
 in a different folder from the DLL, or the fix is already loaded in the "without" run.
 
+`build\Release\test\convtest.exe` checks the conversion math alone on Windows' software
+renderer (WARP). It needs no GPU or HDR monitor, and CI runs it on every build.
+
 ## Project layout
 
 ```
@@ -286,6 +289,8 @@ src/verbose_log.*          optional per-second capture statistics
 src/delay_load.cpp         delay-loaded DLLs come from System32 only
 src/version.rc, version.h.in   file version info
 test/hdrtest.cpp           verification program
+test/convtest.cpp          conversion math on WARP (runs in CI)
+test/reference_math.h      expected output, shared by both tests
 ```
 
 ## License

@@ -91,6 +91,7 @@ struct MonitorState {
 // and reading the SDR white level take a system-wide display lock that makes games stutter
 // (see converter.cpp). So a stream keeps the HDR state and SDR white it started with.
 std::map<HMONITOR, MonitorState>& g_monitors = *new std::map<HMONITOR, MonitorState>;
+ULONGLONG g_lastCall = 0; // last PrintWindow we looked at, on any monitor. Under g_lock.
 
 // Whether a monitor is in HDR mode, its DXGI output and SDR white level. Under g_lock.
 const MonitorState& LookupMonitor(HMONITOR monitor)
@@ -144,8 +145,11 @@ DWORD WINAPI SweepThread(void*)
                 ++it;
             }
         }
-        if (g_windows.empty())
-            g_monitors.clear(); // no stream: look again next time (HDR may have been toggled)
+        // No capture at all for a while: look again next time (HDR may have been toggled).
+        // Not just "no tracked windows": windows on SDR monitors are never tracked, and
+        // clearing every second while one is streamed would query the displays every second.
+        if (g_windows.empty() && now - g_lastCall > kIdleCloseMs)
+            g_monitors.clear();
     }
 }
 
@@ -251,6 +255,7 @@ bool ReplacePixels(HWND hwnd, HDC dc, bool instead)
 
     const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     Lock lock;
+    g_lastCall = GetTickCount64();
     StartSweeperOnce();
     const MonitorState& mon = LookupMonitor(monitor);
     if (!mon.hdr) {

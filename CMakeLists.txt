@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(hdrfix VERSION 1.1.2 LANGUAGES C CXX RC)
+project(hdrfix VERSION 1.1.3 LANGUAGES C CXX RC)
 
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "hdrfix must be built with MSVC for x64")
@@ -85,6 +85,15 @@ target_compile_options(hdrtest PRIVATE /W4 /permissive-)
 target_link_libraries(hdrtest PRIVATE d3d11 dxgi windowscodecs ole32 user32 gdi32)
 set_target_properties(hdrtest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/test")
 add_dependencies(hdrtest hdrfix)
+
+# --- Converter test on WARP (software GPU): runs anywhere, including CI ------
+add_executable(convtest test/convtest.cpp src/converter.cpp src/log_config.cpp src/display_info.cpp)
+target_include_directories(convtest PRIVATE ${GEN_DIR})
+target_compile_definitions(convtest PRIVATE ${COMMON_DEFS})
+target_compile_options(convtest PRIVATE /W4 /permissive-)
+target_link_libraries(convtest PRIVATE d3d11 dxgi user32)
+set_target_properties(convtest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/test")
+add_dependencies(convtest hdrfix) # hdrfix generates the shader headers
 
 # --- Release layout: cmake --install <build> --config Release --prefix dist ---
 #   dist/                 what users copy into the TeamSpeak folder, plus docs

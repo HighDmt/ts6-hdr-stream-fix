@@ -26,7 +26,8 @@ namespace {
 constexpr std::chrono::milliseconds kMinFrameInterval{12};
 constexpr auto kFormat = wgd::DirectXPixelFormat::R16G16B16A16Float;
 
-// One D3D11 device for all window captures, used under the caller's lock.
+// The D3D11 device new window captures are made on (replaced after a driver reset), used
+// under the caller's lock.
 // Heap-allocated and never destroyed: the DLL is pinned, so destructors would only run at
 // process exit, when graphics/WinRT DLLs may already be shut down and releasing captures
 // or devices crashes the exiting process.
@@ -39,8 +40,13 @@ Device& g_dev = *new Device;
 
 bool EnsureDevice()
 {
-    if (g_dev.device)
-        return true;
+    if (g_dev.device) {
+        // A driver reset (e.g. after a GPU crash) leaves the device unusable for good.
+        if (g_dev.device->GetDeviceRemovedReason() == S_OK)
+            return true;
+        Log("window fix: the graphics device was reset, creating a new one");
+        g_dev = Device{};
+    }
 
     // WinRT capture objects live in the multithreaded COM apartment. Make sure one exists
     // for the rest of the process, whatever TeamSpeak's threads do with COM.
@@ -91,6 +97,7 @@ struct WindowCapture::Impl {
     wgc::Direct3D11CaptureFramePool pool{nullptr};
     wgc::GraphicsCaptureSession session{nullptr};
     winrt::Windows::Graphics::SizeInt32 poolSize{};
+    Device dev; // the device this capture was made on (g_dev may be replaced after a reset)
     Converter converter;
     Readback buffers[2];
     int current = -1; // mapped: what Current() hands out
@@ -109,10 +116,10 @@ struct WindowCapture::Impl {
         }
     }
 
-    static void Unmap(Readback& b)
+    void Unmap(Readback& b)
     {
         if (b.mapped)
-            g_dev.context->Unmap(b.texture.Get(), 0);
+            dev.context->Unmap(b.texture.Get(), 0);
         b.mapped = false;
     }
 
@@ -124,7 +131,7 @@ struct WindowCapture::Impl {
             return true;
         Readback& b = buffers[pending];
         const HRESULT hr =
-            g_dev.context->Map(b.texture.Get(), 0, D3D11_MAP_READ, wait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &b.map);
+            dev.context->Map(b.texture.Get(), 0, D3D11_MAP_READ, wait ? 0 : D3D11_MAP_FLAG_DO_NOT_WAIT, &b.map);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
             return true;
         if (FAILED(hr)) {
@@ -159,7 +166,7 @@ struct WindowCapture::Impl {
         if (size.Width <= 0 || size.Height <= 0)
             return true; // minimized or closing: keep the current frame
         if (size.Width != poolSize.Width || size.Height != poolSize.Height) {
-            pool.Recreate(g_dev.winrtDevice, kFormat, 2, size); // window was resized
+            pool.Recreate(dev.winrtDevice, kFormat, 2, size); // window was resized
             poolSize = size;
         }
 
@@ -190,14 +197,14 @@ struct WindowCapture::Impl {
             d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             d.MiscFlags = 0;
             b.texture.Reset();
-            const HRESULT hr = g_dev.device->CreateTexture2D(&d, nullptr, &b.texture);
+            const HRESULT hr = dev.device->CreateTexture2D(&d, nullptr, &b.texture);
             if (FAILED(hr)) {
                 Log("window fix: CreateTexture2D(readback) failed, hr=0x%08lX", static_cast<unsigned long>(hr));
                 return false;
             }
         }
-        g_dev.context->CopyResource(b.texture.Get(), converted);
-        g_dev.context->Flush(); // start the GPU work now, so it's done by the next call
+        dev.context->CopyResource(b.texture.Get(), converted);
+        dev.context->Flush(); // start the GPU work now, so it's done by the next call
         latest.Close();
         b.width = std::min<UINT>(size.Width, d.Width);
         b.height = std::min<UINT>(size.Height, d.Height);
@@ -218,8 +225,9 @@ std::unique_ptr<WindowCapture> WindowCapture::Start(HWND hwnd, const DXGI_OUTPUT
         if (!EnsureDevice())
             return nullptr;
         auto s = std::make_unique<Impl>();
+        s->dev = g_dev;
         step = "converter setup";
-        if (!s->converter.Init(g_dev.device.Get(), output, DXGI_FORMAT_B8G8R8A8_UNORM, sdrWhiteNits))
+        if (!s->converter.Init(s->dev.device.Get(), output, DXGI_FORMAT_B8G8R8A8_UNORM, sdrWhiteNits))
             return nullptr;
 
         step = "CreateForWindow";
@@ -232,7 +240,7 @@ std::unique_ptr<WindowCapture> WindowCapture::Start(HWND hwnd, const DXGI_OUTPUT
             return nullptr;
         }
         step = "CreateFreeThreaded";
-        s->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(g_dev.winrtDevice, kFormat, 2, s->poolSize);
+        s->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(s->dev.winrtDevice, kFormat, 2, s->poolSize);
         step = "CreateCaptureSession";
         s->session = s->pool.CreateCaptureSession(s->item);
         try {
