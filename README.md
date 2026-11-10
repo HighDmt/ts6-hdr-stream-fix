@@ -104,9 +104,9 @@ give for HDR content brighter than your desktop's white:
 - `knee=0.75` (default): HDR highlights (HDR games and videos) keep some detail and their
   colours, but white UI comes out slightly dimmer (255 becomes about 240). Everything
   below 75% of your desktop's white is untouched.
-- `knee=1`: desktop, apps and text come out exactly as on your screen, but brighter HDR
-  highlights all become plain white, and very bright saturated colours can shift (a bright
-  orange turns yellowish). Best if you only share desktop or apps.
+- `knee=1`: desktop, apps and text come out exactly as on your screen, but HDR highlights
+  brighter than white lose all their detail: each one becomes the brightest colour of its hue
+  that SDR can show. Best if you only share desktop or apps.
 
 ## Troubleshooting
 
@@ -166,6 +166,8 @@ contains no user names, file paths or window titles. It does contain window clas
   The copy runs one frame ahead, so TeamSpeak doesn't wait for the GPU, and the shared
   app runs one frame (about 17 ms at 60 fps) behind the screen. Full-screen sharing adds
   one GPU pass per frame, well under a millisecond on a modern GPU.
+- hdrfix never changes how many frames TeamSpeak streams. TeamSpeak asks for a picture at
+  the frame rate chosen in its own settings, and hdrfix only corrects each picture it asks for.
 - The SDR content brightness and the monitor's HDR state are read when a share starts,
   never during it: reading them takes a system-wide display lock that makes games
   stutter. Changing the slider, or turning HDR on or off, applies from the next share

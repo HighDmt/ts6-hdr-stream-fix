@@ -9,7 +9,7 @@ cbuffer Params : register(b0)
     float g_Scale;  // 80 / sdrWhiteNits: SDR white becomes exactly 1.0
     float g_Knee;   // the shoulder starts here (in SDR-white units, < 1)
     float g_InvW2;  // 1 / W^2, W = HDR peak position in shoulder space (see Shoulder)
-    uint  g_Mode;   // bit 0: shoulder on (else hard clip), bit 1: sRGB-encode output
+    uint  g_Mode;   // bit 0: shoulder on (else clip at 1.0), bit 1: sRGB-encode output
 };
 
 Texture2D<float4> g_Src : register(t0);
@@ -43,9 +43,12 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target
     float3 c = max(g_Src.Load(int3(pos.xy, 0)).rgb * g_Scale, 0.0);
 
     // Tone-map on max(R,G,B) and scale all channels by the same ratio: keeps hue.
+    // Without the shoulder, anything brighter than white is clipped the same way.
     float m = max(c.r, max(c.g, c.b));
     if ((g_Mode & 1) != 0 && m > g_Knee)
         c *= Shoulder(m) / m;
+    else if (m > 1.0)
+        c /= m;
     c = min(c, 1.0);
 
     if ((g_Mode & 2) != 0)
